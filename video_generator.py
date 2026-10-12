@@ -1,34 +1,87 @@
-import subprocess
-import shutil
-import math
 import os
+import math
+import shutil
+import subprocess
+import urllib.request
+import urllib.error
+import json
+from io import BytesIO
 from pathlib import Path
 
 from google import genai
 from google.genai import types
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-# =========================================================
+
+# =========================
 # إعدادات الفيديو
-# =========================================================
-W, H = 1080, 1920
-FPS = 30
+# =========================
+
+W, H = 720, 1280
+FPS = 24
 
 OUT = Path("output")
 FRAMES = OUT / "frames"
+IMAGES = OUT / "scene_images"
+
 OUT.mkdir(exist_ok=True)
 
 FONT_PATH = "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf"
 
-font = ImageFont.truetype(FONT_PATH, 39)
-title_font = ImageFont.truetype(FONT_BOLD, 49)
-small_font = ImageFont.truetype(FONT_BOLD, 25)
+font = ImageFont.truetype(FONT_PATH, 30)
+title_font = ImageFont.truetype(FONT_BOLD, 36)
+small_font = ImageFont.truetype(FONT_BOLD, 23)
 
 
-# =========================================================
-# قراءة القصة
-# =========================================================
+# =========================
+# الشخصيات المعروفة
+# =========================
+
+CHARACTERS = {
+    "تفاحة": (
+        "a cute anthropomorphic red apple character, "
+        "small green leaf, expressive large eyes"
+    ),
+    "الفراولة": (
+        "a cute anthropomorphic red strawberry character, "
+        "tiny green leaves, expressive large eyes"
+    ),
+    "موزة": (
+        "a cute anthropomorphic yellow banana character, "
+        "friendly expressive face"
+    ),
+    "الليمونة": (
+        "a cute anthropomorphic yellow lemon character, "
+        "expressive eyes and a friendly face"
+    ),
+    "قطة صغيرة": (
+        "a small adorable orange kitten, expressive eyes"
+    ),
+    "كلب شقي": (
+        "a playful small cartoon puppy, expressive eyes"
+    ),
+    "ولد ذكي": (
+        "a clever Egyptian cartoon teenage boy, "
+        "short dark hair, casual clothes"
+    ),
+    "صاحبه": (
+        "another Egyptian cartoon teenage boy, "
+        "short dark hair, casual clothes"
+    ),
+    "أرنب": (
+        "a cute white cartoon rabbit, expressive eyes"
+    ),
+    "ثعلب": (
+        "an orange cartoon fox, expressive eyes"
+    ),
+}
+
+
+# =========================
+# قراءة القصة وتقسيمها
+# =========================
+
 story_file = OUT / "story.txt"
 
 if not story_file.exists():
@@ -36,9 +89,9 @@ if not story_file.exists():
 
 story = story_file.read_text(encoding="utf-8")
 
-title = "حكاية كرتونية"
-lines = []
-reading_scenes = False
+title = "حكايات كرتونية"
+scene_blocks = []
+current_scene = None
 
 for raw_line in story.splitlines():
     line = raw_line.strip()
@@ -47,778 +100,235 @@ for raw_line in story.splitlines():
         continue
 
     if line.startswith("عنوان القصة:"):
-        title = line.split(":", 1)[1].strip() or title
+        title = line.split(":", 1)[1].strip()
         continue
 
     if line.startswith("المشهد"):
-        reading_scenes = True
+        if current_scene:
+            scene_blocks.append(" ".join(current_scene))
+
+        current_scene = []
         continue
 
-    if line == "النهاية:":
-        break
+    if line.startswith("النهاية:"):
+        if current_scene:
+            scene_blocks.append(" ".join(current_scene))
 
-    if reading_scenes:
-        lines.append(line)
+        current_scene = []
+        continue
 
-if not lines:
-    raise ValueError("ملقيناش مشاهد صالحة في ملف القصة!")
+    if current_scene is not None:
+        current_scene.append(line)
 
-lines = lines[:5]
+if current_scene:
+    scene_blocks.append(" ".join(current_scene))
 
-
-# =========================================================
-# أدوات مساعدة
-# =========================================================
-def wrap_arabic(draw, text, selected_font, max_width):
-    words = text.split()
-    result = []
-    current = ""
-
-    for word in words:
-        candidate = f"{current} {word}".strip()
-
-        bbox = draw.textbbox(
-            (0, 0),
-            candidate,
-            font=selected_font,
-            direction="rtl",
-            language="ar",
-        )
-
-        if bbox[2] - bbox[0] <= max_width or not current:
-            current = candidate
-        else:
-            result.append(current)
-            current = word
-
-    if current:
-        result.append(current)
-
-    return "\n".join(result)
-
-
-def lerp_color(a, b, t):
-    return tuple(
-        int(a[i] * (1 - t) + b[i] * t)
-        for i in range(3)
-    )
-
-
-def make_gradient(top, bottom):
-    img = Image.new("RGB", (W, H))
-    draw = ImageDraw.Draw(img)
-
-    for y in range(H):
-        color = lerp_color(
-            top,
-            bottom,
-            y / max(1, H - 1),
-        )
-
-        draw.line(
-            (0, y, W, y),
-            fill=color,
-        )
-
-    return img
-
-
-def add_glow(img, box, color, blur=55):
-    glow = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    glow_draw = ImageDraw.Draw(glow)
-
-    glow_draw.ellipse(
-        box,
-        fill=(*color, 115),
-    )
-
-    glow = glow.filter(
-        ImageFilter.GaussianBlur(blur)
-    )
-
-    return Image.alpha_composite(
-        img.convert("RGBA"),
-        glow,
-    ).convert("RGB")
-
-
-# =========================================================
-# خلفيات مصرية سينمائية
-# =========================================================
-PALETTES = [
-    ((20, 31, 66), (190, 104, 82)),
-    ((20, 62, 91), (105, 158, 155)),
-    ((42, 30, 70), (176, 94, 117)),
-    ((27, 43, 65), (135, 140, 157)),
-    ((42, 36, 60), (207, 137, 83)),
+scenes = [
+    text.strip()
+    for text in scene_blocks
+    if text.strip()
 ]
 
-
-def make_background(scene_index):
-    top, bottom = PALETTES[
-        scene_index % len(PALETTES)
+# ضمان عدم فقد القصة لو تنسيقها مختلف
+if not scenes:
+    scenes = [
+        line.strip()
+        for line in story.splitlines()
+        if line.strip()
+        and not line.startswith("عنوان القصة:")
+        and not line.startswith("المشهد")
+        and not line.startswith("النهاية:")
     ]
 
-    img = make_gradient(top, bottom)
+scenes = scenes[:5]
 
-    img = add_glow(
-        img,
-        (120, 150, 600, 630),
-        (255, 204, 132),
-        70,
-    )
+if not scenes:
+    raise ValueError("القصة لا تحتوي على مشاهد صالحة!")
 
-    draw = ImageDraw.Draw(img)
-
-    # مبانٍ مصرية متدرجة في العمق
-    for i in range(16):
-        x = i * 72 - 10
-
-        building_height = (
-            170 + ((i * 59 + scene_index * 31) % 250)
-        )
-
-        y = 870 - building_height
-
-        shade = (
-            37 + (i % 4) * 5,
-            43 + (i % 3) * 5,
-            62 + (i % 4) * 4,
-        )
-
-        draw.rectangle(
-            (x, y, x + 82, 875),
-            fill=shade,
-        )
-
-        # خزانات مياه وهوائيات
-        if i % 3 == 0:
-            draw.rectangle(
-                (x + 25, y - 25, x + 53, y),
-                fill=(34, 39, 56),
-            )
-
-            draw.line(
-                (x + 39, y - 48, x + 39, y - 25),
-                fill=(34, 39, 56),
-                width=4,
-            )
-
-        # شبابيك مضيئة
-        for wy in range(y + 28, 845, 43):
-            for wx in range(x + 12, x + 70, 26):
-                if (wx + wy + scene_index) % 4:
-                    draw.rounded_rectangle(
-                        (wx, wy, wx + 10, wy + 16),
-                        radius=2,
-                        fill=(232, 186, 111),
-                    )
-
-    # واجهة محل في بعض المشاهد
-    if scene_index % 2 == 0:
-        draw.rectangle(
-            (35, 650, 310, 895),
-            fill=(103, 68, 54),
-        )
-
-        draw.rectangle(
-            (55, 690, 290, 855),
-            fill=(32, 43, 55),
-        )
-
-        draw.rectangle(
-            (35, 625, 310, 680),
-            fill=(225, 170, 77),
-        )
-
-        draw.text(
-            (172, 652),
-            "بقالة",
-            font=small_font,
-            fill=(48, 37, 34),
-            anchor="mm",
-            direction="rtl",
-            language="ar",
-        )
-
-        for x in range(45, 305, 42):
-            color = (
-                (181, 72, 67)
-                if (x // 42) % 2
-                else (240, 211, 151)
-            )
-
-            draw.polygon(
-                [
-                    (x, 680),
-                    (x + 22, 680),
-                    (x + 32, 707),
-                    (x + 10, 707),
-                ],
-                fill=color,
-            )
-
-    # أرضية الشارع
-    draw.polygon(
-        [(0, 825), (W, 825), (W, H), (0, H)],
-        fill=(47, 50, 64),
-    )
-
-    draw.polygon(
-        [(0, 910), (W, 910), (W, 1050), (0, 1050)],
-        fill=(61, 63, 75),
-    )
-
-    # خطوط المنظور
-    for i in range(8):
-        y = 920 + i * 125
-
-        draw.line(
-            (0, y, W, y + 55),
-            fill=(76, 78, 88),
-            width=3,
-        )
-
-    draw.line(
-        (W // 2, 845, 290, H),
-        fill=(86, 84, 91),
-        width=5,
-    )
-
-    draw.line(
-        (W // 2, 845, 850, H),
-        fill=(86, 84, 91),
-        width=5,
-    )
-
-    # أعمدة إنارة
-    for lx in (75, 990):
-        draw.line(
-            (lx, 570, lx, 870),
-            fill=(30, 34, 47),
-            width=11,
-        )
-
-        end_x = lx + (
-            50 if lx < W // 2 else -50
-        )
-
-        draw.line(
-            (lx, 575, end_x, 575),
-            fill=(30, 34, 47),
-            width=9,
-        )
-
-        draw.ellipse(
-            (
-                end_x - 13,
-                562,
-                end_x + 13,
-                588,
-            ),
-            fill=(255, 218, 145),
-        )
-
-    # تظليل خفيف على الأطراف
-    mask = Image.new("L", (W, H), 0)
-    mask_draw = ImageDraw.Draw(mask)
-
-    mask_draw.ellipse(
-        (-220, -180, W + 220, H + 220),
-        fill=210,
-    )
-
-    mask = mask.filter(
-        ImageFilter.GaussianBlur(130)
-    )
-
-    dark = Image.new(
-        "RGB",
-        (W, H),
-        (10, 12, 24),
-    )
-
-    return Image.composite(
-        img,
-        dark,
-        mask,
-    )
+print(f"Story title: {title}")
+print(f"Scenes found: {len(scenes)}")
 
 
-# =========================================================
-# رسم شخصية كرتونية بتأثير شبه ثلاثي الأبعاد
-# =========================================================
-def draw_character(
-    base,
-    cx,
-    cy,
-    scale,
-    shirt_color,
-    hair_color,
-    mood,
-    elapsed,
-    role=0,
-):
-    s = scale
+# =========================
+# تجهيز وصف الشخصيات
+# =========================
 
-    cx = int(cx)
-    cy = int(cy)
+found_characters = [
+    description
+    for name, description in CHARACTERS.items()
+    if name in title
+]
 
-    # حركة مستمرة مع الزمن
-    bob = (
-        math.sin(elapsed * 2 * math.pi * 1.35 + role)
-        * 8 * s
-    )
+if not found_characters:
+    found_characters = [
+        "a cute expressive 3D cartoon character"
+    ]
 
-    walk = math.sin(
-        elapsed * 2 * math.pi * 1.1 + role
-    )
+character_description = "; ".join(found_characters[:2])
 
-    cy += int(bob)
 
-    arm_swing = int(18 * walk * s)
-    leg_swing = int(11 * walk * s)
+# =========================
+# تجهيز وصف مختلف لكل مشهد
+# =========================
 
-    outline = (37, 29, 39, 255)
-
-    skin = (235, 171, 128, 255)
-    skin_light = (255, 210, 164, 255)
-    skin_shadow = (190, 116, 88, 255)
-
-    shirt_light = tuple(
-        min(255, c + 36)
-        for c in shirt_color
-    ) + (255,)
-
-    shirt_dark = tuple(
-        max(0, c - 45)
-        for c in shirt_color
-    ) + (255,)
-
-    shirt = tuple(shirt_color) + (255,)
-
-    layer = Image.new(
-        "RGBA",
-        base.size,
-        (0, 0, 0, 0),
-    )
-
-    draw = ImageDraw.Draw(layer)
-
-    # ظل أسفل الشخصية
-    shadow = Image.new(
-        "RGBA",
-        base.size,
-        (0, 0, 0, 0),
-    )
-
-    shadow_draw = ImageDraw.Draw(shadow)
-
-    shadow_draw.ellipse(
+def build_prompt(index, scene_text):
+    scene_directions = [
         (
-            int(cx - 105 * s),
-            int(cy + 240 * s),
-            int(cx + 105 * s),
-            int(cy + 278 * s),
+            "Show the main character enjoying an ordinary day "
+            "in a colorful Egyptian neighborhood, wide establishing shot."
         ),
-        fill=(4, 7, 15, 100),
-    )
-
-    shadow = shadow.filter(
-        ImageFilter.GaussianBlur(
-            max(3, int(12 * s))
-        )
-    )
-
-    layer = Image.alpha_composite(
-        layer,
-        shadow,
-    )
-
-    draw = ImageDraw.Draw(layer)
-
-    # الرجلان
-    draw.line(
         (
-            int(cx - 28 * s),
-            int(cy + 185 * s),
-            int(cx - 36 * s + leg_swing),
-            int(cy + 245 * s),
+            "Show the characters meeting unexpectedly in a Cairo street, "
+            "expressive faces, dynamic composition."
         ),
-        fill=outline,
-        width=max(7, int(16 * s)),
-    )
-
-    draw.line(
         (
-            int(cx + 28 * s),
-            int(cy + 185 * s),
-            int(cx + 36 * s - leg_swing),
-            int(cy + 245 * s),
+            "Show the main character discovering a mysterious problem, "
+            "dramatic lighting, suspenseful atmosphere."
         ),
-        fill=outline,
-        width=max(7, int(16 * s)),
-    )
-
-    # الحذاء
-    draw.ellipse(
         (
-            int(cx - 66 * s + leg_swing),
-            int(cy + 235 * s),
-            int(cx - 22 * s + leg_swing),
-            int(cy + 258 * s),
+            "Show a surprising revelation between the characters, "
+            "strong emotions, cinematic close-up."
         ),
-        fill=(35, 33, 42, 255),
-        outline=outline,
-        width=3,
-    )
-
-    draw.ellipse(
         (
-            int(cx + 17 * s - leg_swing),
-            int(cy + 235 * s),
-            int(cx + 63 * s - leg_swing),
-            int(cy + 258 * s),
+            "Show a mysterious cliffhanger with a glowing object or "
+            "a strange discovery, dramatic cinematic composition."
         ),
-        fill=(35, 33, 42, 255),
-        outline=outline,
-        width=3,
-    )
+    ]
 
-    # الذراعان
-    left_y = cy + int(
-        (95 if mood == "surprised" else 135) * s
-    )
+    direction = scene_directions[min(index, 4)]
 
-    right_y = cy + int(
-        (95 if mood == "worried" else 135) * s
-    )
-
-    draw.line(
-        (
-            int(cx - 57 * s),
-            int(cy + 72 * s),
-            int(cx - 92 * s - arm_swing),
-            left_y,
-        ),
-        fill=outline,
-        width=max(8, int(22 * s)),
-    )
-
-    draw.line(
-        (
-            int(cx + 57 * s),
-            int(cy + 72 * s),
-            int(cx + 92 * s + arm_swing),
-            right_y,
-        ),
-        fill=outline,
-        width=max(8, int(22 * s)),
-    )
-
-    draw.line(
-        (
-            int(cx - 57 * s),
-            int(cy + 72 * s),
-            int(cx - 92 * s - arm_swing),
-            left_y,
-        ),
-        fill=skin,
-        width=max(5, int(13 * s)),
-    )
-
-    draw.line(
-        (
-            int(cx + 57 * s),
-            int(cy + 72 * s),
-            int(cx + 92 * s + arm_swing),
-            right_y,
-        ),
-        fill=skin,
-        width=max(5, int(13 * s)),
-    )
-
-    # الجسم
-    draw.rounded_rectangle(
-        (
-            int(cx - 70 * s),
-            int(cy + 42 * s),
-            int(cx + 70 * s),
-            int(cy + 205 * s),
-        ),
-        radius=int(28 * s),
-        fill=shirt,
-        outline=outline,
-        width=max(3, int(5 * s)),
-    )
-
-    # إضاءة على جانب القميص
-    draw.rounded_rectangle(
-        (
-            int(cx - 59 * s),
-            int(cy + 53 * s),
-            int(cx - 31 * s),
-            int(cy + 190 * s),
-        ),
-        radius=int(12 * s),
-        fill=shirt_light,
-    )
-
-    # ظل على الجانب الآخر
-    draw.polygon(
-        [
-            (int(cx + 34 * s), int(cy + 48 * s)),
-            (int(cx + 66 * s), int(cy + 57 * s)),
-            (int(cx + 66 * s), int(cy + 190 * s)),
-            (int(cx + 42 * s), int(cy + 198 * s)),
-        ],
-        fill=shirt_dark,
-    )
-
-    # ياقة القميص
-    draw.polygon(
-        [
-            (int(cx - 20 * s), int(cy + 43 * s)),
-            (cx, int(cy + 69 * s)),
-            (int(cx + 20 * s), int(cy + 43 * s)),
-            (int(cx + 10 * s), int(cy + 81 * s)),
-            (int(cx - 10 * s), int(cy + 81 * s)),
-        ],
-        fill=(246, 229, 205, 255),
-    )
-
-    # الرقبة
-    draw.rounded_rectangle(
-        (
-            int(cx - 18 * s),
-            int(cy + 17 * s),
-            int(cx + 18 * s),
-            int(cy + 65 * s),
-        ),
-        radius=int(8 * s),
-        fill=skin_shadow,
-    )
-
-    draw.rectangle(
-        (
-            int(cx - 13 * s),
-            int(cy + 20 * s),
-            int(cx + 11 * s),
-            int(cy + 57 * s),
-        ),
-        fill=skin,
-    )
-
-    # الرأس
-    r = int(72 * s)
-
-    draw.ellipse(
-        (
-            int(cx - r + 5 * s),
-            int(cy - r + 8 * s),
-            int(cx + r + 8 * s),
-            int(cy + r + 11 * s),
-        ),
-        fill=(15, 15, 27, 90),
-    )
-
-    draw.ellipse(
-        (
-            cx - r,
-            cy - r,
-            cx + r,
-            cy + r,
-        ),
-        fill=skin,
-        outline=outline,
-        width=max(3, int(5 * s)),
-    )
-
-    # إضاءة الوجه
-    draw.ellipse(
-        (
-            int(cx - r + 9 * s),
-            int(cy - r + 8 * s),
-            int(cx + 18 * s),
-            int(cy + 30 * s),
-        ),
-        fill=skin_light,
-    )
-
-    # ظل الوجه
-    draw.ellipse(
-        (
-            int(cx + 20 * s),
-            int(cy - 10 * s),
-            int(cx + r - 7 * s),
-            int(cy + r - 4 * s),
-        ),
-        fill=skin_shadow,
-    )
-
-    # الشعر
-    draw.pieslice(
-        (
-            cx - r - 3,
-            int(cy - r - 10 * s),
-            cx + r + 3,
-            int(cy + 45 * s),
-        ),
-        start=180,
-        end=360,
-        fill=tuple(hair_color) + (255,),
-        outline=outline,
-        width=max(2, int(3 * s)),
-    )
-
-    draw.polygon(
-        [
-            (int(cx - 55 * s), int(cy - r + 26 * s)),
-            (int(cx - 22 * s), int(cy - r + 8 * s)),
-            (int(cx + 4 * s), int(cy - r + 30 * s)),
-            (int(cx + 33 * s), int(cy - r + 18 * s)),
-            (int(cx + 52 * s), int(cy - r + 44 * s)),
-            (int(cx - 50 * s), int(cy - r + 48 * s)),
-        ],
-        fill=tuple(hair_color) + (255,),
-    )
-
-    # العينان والحواجب
-    eye_y = int(cy - 7 * s)
-    eye_r = max(4, int(8 * s))
-
-    for side in (-1, 1):
-        ex = int(cx + side * 25 * s)
-
-        brow_y = int(
-            eye_y - (
-                25 * s
-                if mood == "surprised"
-                else 18 * s
-            )
+    # تفاصيل إضافية حسب أحداث القصة
+    if "صندوق" in scene_text:
+        direction += (
+            " Include a mysterious old box with a soft glowing light."
         )
 
-        draw.line(
-            (
-                ex - int(11 * s),
-                brow_y,
-                ex + int(10 * s),
-                brow_y + int(2 * s),
-            ),
-            fill=outline,
-            width=max(2, int(5 * s)),
+    if "منتصف الليل" in scene_text or "الليل" in scene_text:
+        direction += (
+            " It is nighttime, with moonlight and dramatic shadows."
         )
 
-        draw.ellipse(
-            (
-                ex - eye_r - int(3 * s),
-                eye_y - eye_r - int(4 * s),
-                ex + eye_r + int(3 * s),
-                eye_y + eye_r + int(5 * s),
-            ),
-            fill=(255, 251, 241, 255),
+    if "مسابقة" in scene_text:
+        direction += (
+            " Show a colorful competition stage and a small audience."
         )
 
-        pupil_shift = int(
-            2 * s * math.sin(elapsed * 1.8 + role)
+    if "سر" in scene_text or "الحقيقة" in scene_text:
+        direction += (
+            " Include a mysterious clue and surprised character expressions."
         )
 
-        draw.ellipse(
-            (
-                ex - 4 + pupil_shift,
-                eye_y - 4,
-                ex + 4 + pupil_shift,
-                eye_y + 5,
-            ),
-            fill=(34, 30, 38, 255),
+    return f"""
+Create a polished, high-quality 3D animated movie frame.
+
+Characters:
+{character_description}
+
+Scene:
+{direction}
+
+Story context:
+{scene_text}
+
+Visual requirements:
+- Consistent character designs and clothing across scenes.
+- Expressive faces and clear body language.
+- Detailed cinematic environment.
+- Professional 3D cartoon movie aesthetic.
+- Beautiful cinematic lighting and depth.
+- Rich colors and realistic soft shadows.
+- Portrait 9:16 composition.
+- Keep the main characters clearly visible.
+- No text, no captions, no letters, no watermark.
+"""
+
+
+# =========================
+# توليد الصور باستخدام Cloudflare
+# =========================
+
+def generate_image(prompt, index):
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    api_token = os.environ.get("CLOUDFLARE_API_TOKEN")
+
+    if not account_id or not api_token:
+        raise RuntimeError(
+            "تأكد من إضافة CLOUDFLARE_ACCOUNT_ID "
+            "وCLOUDFLARE_API_TOKEN في GitHub Secrets "
+            "وتمريرهما إلى خطوة تشغيل الفيديو."
         )
 
-        draw.ellipse(
-            (
-                ex - 2 + pupil_shift,
-                eye_y - 3,
-                ex + 1 + pupil_shift,
-                eye_y,
-            ),
-            fill=(255, 255, 255, 255),
-        )
-
-    # الأنف
-    draw.ellipse(
-        (
-            int(cx - 5 * s),
-            int(cy + 3 * s),
-            int(cx + 7 * s),
-            int(cy + 18 * s),
-        ),
-        fill=skin_shadow,
+    url = (
+        "https://api.cloudflare.com/client/v4/accounts/"
+        f"{account_id}/ai/run/"
+        "@cf/bytedance/stable-diffusion-xl-lightning"
     )
 
-    # تعبيرات الفم
-    if mood == "surprised":
-        draw.ellipse(
-            (
-                int(cx - 10 * s),
-                int(cy + 27 * s),
-                int(cx + 10 * s),
-                int(cy + 50 * s),
-            ),
-            fill=(103, 35, 47, 255),
-            outline=outline,
-            width=2,
+    payload = {
+        "prompt": prompt,
+        "width": 576,
+        "height": 1024,
+        "num_steps": 4,
+        "negative_prompt": (
+            "blurry, low quality, distorted face, "
+            "extra limbs, extra fingers, duplicate characters, "
+            "text, letters, watermark"
+        ),
+    }
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    print(f"Generating image {index + 1}/{len(scenes)}...")
+
+    try:
+        with urllib.request.urlopen(request, timeout=240) as response:
+            image_bytes = response.read()
+
+    except urllib.error.HTTPError as error:
+        error_text = error.read().decode(
+            "utf-8", errors="replace"
         )
 
-    elif mood in ("worried", "sad"):
-        draw.arc(
-            (
-                int(cx - 24 * s),
-                int(cy + 31 * s),
-                int(cx + 24 * s),
-                int(cy + 62 * s),
-            ),
-            start=205,
-            end=335,
-            fill=outline,
-            width=max(3, int(5 * s)),
-        )
+        raise RuntimeError(
+            f"Cloudflare image generation failed "
+            f"(HTTP {error.code}): {error_text[:1000]}"
+        ) from error
 
-    else:
-        draw.arc(
-            (
-                int(cx - 28 * s),
-                int(cy + 10 * s),
-                int(cx + 28 * s),
-                int(cy + 51 * s),
-            ),
-            start=10,
-            end=170,
-            fill=outline,
-            width=max(3, int(5 * s)),
-        )
+    except urllib.error.URLError as error:
+        raise RuntimeError(
+            f"تعذر الاتصال بـ Cloudflare: {error.reason}"
+        ) from error
 
-    # الخدود
-    for side in (-1, 1):
-        ex = int(cx + side * 43 * s)
+    try:
+        image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    except Exception as error:
+        raise RuntimeError(
+            "Cloudflare لم يرجع صورة صالحة. "
+            "راجع رسالة الخطأ وحدود الاستخدام."
+        ) from error
 
-        draw.ellipse(
-            (
-                ex - int(9 * s),
-                int(cy + 14 * s),
-                ex + int(8 * s),
-                int(cy + 23 * s),
-            ),
-            fill=(238, 120, 126, 145),
-        )
+    IMAGES.mkdir(parents=True, exist_ok=True)
 
-    return Image.alpha_composite(
-        base.convert("RGBA"),
-        layer,
-    ).convert("RGB")
+    image_path = IMAGES / f"scene_{index + 1}.jpg"
+    image.save(image_path, quality=95)
+
+    print(f"Image saved: {image_path}")
+
+    return image_path
 
 
-# =========================================================
-# توليد الصوت باستخدام Gemini
-# =========================================================
+# =========================
+# توليد التعليق الصوتي
+# =========================
+
 def make_voice(text):
     api_key = os.environ.get("GEMINI_API_KEY")
 
@@ -876,11 +386,134 @@ def make_voice(text):
 
     if not audio_data:
         raise RuntimeError(
-            "Gemini ملقاش صوت في الاستجابة!"
+            "Gemini لم يرجع صوتًا صالحًا. "
+            "راجع الموديل وحدود الـ API."
         )
 
     audio_path = OUT / "narration.wav"
     audio_path.write_bytes(audio_data)
+
+    print("Voice generated:", audio_path)
+
+
+# =========================
+# أدوات مساعدة للنص العربي
+# =========================
+
+def wrap_arabic(draw, text, selected_font, max_width):
+    words = text.split()
+    result = []
+    current = ""
+
+    for word in words:
+        candidate = f"{current} {word}".strip()
+
+        width = draw.textbbox(
+            (0, 0),
+            candidate,
+            font=selected_font,
+            direction="rtl",
+        )[2]
+
+        if width <= max_width or not current:
+            current = candidate
+        else:
+            result.append(current)
+            current = word
+
+    if current:
+        result.append(current)
+
+    return "\n".join(result)
+
+
+# =========================
+# رسم النص فوق الصورة
+# =========================
+
+def decorate_frame(image, scene_text, scene_index, total_scenes):
+    frame = image.convert("RGB")
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    # شريط العنوان
+    draw.rounded_rectangle(
+        (22, 25, W - 22, 105),
+        radius=24,
+        fill=(0, 0, 0, 155),
+    )
+
+    title_text = wrap_arabic(
+        draw, title, title_font, W - 70
+    )
+
+    draw.multiline_text(
+        (W // 2, 65),
+        title_text,
+        font=title_font,
+        fill=(255, 255, 255),
+        anchor="mm",
+        align="center",
+        direction="rtl",
+        language="ar",
+    )
+
+    # رقم المشهد
+    draw.rounded_rectangle(
+        (W // 2 - 100, 120, W // 2 + 100, 165),
+        radius=18,
+        fill=(0, 0, 0, 125),
+    )
+
+    draw.text(
+        (W // 2, 142),
+        f"المشهد {scene_index + 1} من {total_scenes}",
+        font=small_font,
+        fill=(255, 255, 255),
+        anchor="mm",
+        direction="rtl",
+        language="ar",
+    )
+
+    # لوحة التعليق المكتوب
+    draw.rounded_rectangle(
+        (24, 865, W - 24, 1235),
+        radius=30,
+        fill=(0, 0, 0, 175),
+        outline=(255, 255, 255, 90),
+        width=2,
+    )
+
+    wrapped_text = wrap_arabic(
+        draw, scene_text, font, W - 90
+    )
+
+    draw.multiline_text(
+        (W // 2, 1045),
+        wrapped_text,
+        font=font,
+        fill=(255, 255, 255),
+        anchor="mm",
+        align="center",
+        spacing=9,
+        direction="rtl",
+        language="ar",
+    )
+
+    return Image.alpha_composite(
+        frame.convert("RGBA"), overlay
+    ).convert("RGB")
+
+
+# =========================
+# تنفيذ الفيديو
+# =========================
+
+def main():
+    narration = " ".join(scenes)
+
+    # إنشاء الصوت أولًا لمعرفة مدته
+    make_voice(narration)
 
     probe = subprocess.run(
         [
@@ -888,264 +521,165 @@ def make_voice(text):
             "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
-            str(audio_path),
+            str(OUT / "narration.wav"),
         ],
         capture_output=True,
         text=True,
+        check=True,
     )
 
-    if probe.returncode != 0:
+    audio_duration = float(probe.stdout.strip())
+
+    total_frames = max(
+        FPS * len(scenes),
+        round(audio_duration * FPS),
+    )
+
+    # توزيع مدة الفيديو على المشاهد حسب طول النص
+    weights = [max(1, len(scene.split())) for scene in scenes]
+    weight_total = sum(weights)
+
+    frame_counts = [
+        max(1, round(total_frames * weight / weight_total))
+        for weight in weights
+    ]
+
+    frame_counts[-1] += total_frames - sum(frame_counts)
+
+    if frame_counts[-1] < 1:
         raise RuntimeError(
-            "ملف الصوت غير صالح: " + probe.stderr[-1000:]
+            "مدة الصوت قصيرة جدًا لعدد المشاهد."
         )
 
-    return float(probe.stdout.strip())
+    # حذف الإطارات والصور القديمة
+    for folder in (FRAMES, IMAGES):
+        if folder.exists():
+            shutil.rmtree(folder)
+        folder.mkdir(parents=True, exist_ok=True)
 
+    # توليد صورة مستقلة لكل مشهد
+    scene_images = []
 
-# =========================================================
-# توزيع زمن الصوت على المشاهد
-# =========================================================
-narration = " ".join(lines)
-audio_duration = make_voice(narration)
+    for index, scene_text in enumerate(scenes):
+        prompt = build_prompt(index, scene_text)
+        path = generate_image(prompt, index)
+        scene_images.append(path)
 
-target_frames = max(
-    len(lines),
-    round(audio_duration * FPS),
-)
+    frame_number = 0
+    previous_scene_frame = None
+    transition_frames = max(1, FPS // 3)
 
-weights = [
-    max(1, len(line.split()))
-    for line in lines
-]
+    for scene_index, (scene_text, image_path, count) in enumerate(
+        zip(scenes, scene_images, frame_counts)
+    ):
+        print(f"Rendering scene {scene_index + 1}/{len(scenes)}")
 
-total_words = sum(weights)
+        source = Image.open(image_path).convert("RGB")
 
-scene_frames = []
-previous_boundary = 0
-cumulative_words = 0
-
-for index, weight in enumerate(weights):
-    cumulative_words += weight
-
-    if index == len(weights) - 1:
-        boundary = target_frames
-    else:
-        boundary = round(
-            target_frames * cumulative_words / total_words
+        base = ImageOps.fit(
+            source,
+            (W, H),
+            method=Image.Resampling.LANCZOS,
         )
 
-    scene_frames.append(
-        max(1, boundary - previous_boundary)
-    )
+        scene_last_frame = None
 
-    previous_boundary = boundary
+        for local_frame in range(count):
+            progress = local_frame / max(1, count - 1)
 
-scene_frames[-1] += target_frames - sum(scene_frames)
+            # حركة تقريب تدريجية مع تحريك بسيط للكاميرا
+            zoom = 1.0 + 0.075 * progress
 
+            new_w = int(W * zoom)
+            new_h = int(H * zoom)
 
-# =========================================================
-# إنشاء الإطارات
-# =========================================================
-if FRAMES.exists():
-    shutil.rmtree(FRAMES)
-
-FRAMES.mkdir(parents=True)
-
-moods = [
-    "happy",
-    "worried",
-    "surprised",
-    "sad",
-    "happy",
-]
-
-main_shirt = (221, 83, 73)
-main_hair = (54, 34, 29)
-
-second_shirt = (56, 133, 205)
-second_hair = (39, 31, 28)
-
-frame_number = 0
-
-for scene_index, text in enumerate(lines):
-    base = make_background(scene_index)
-
-    # لوحة العنوان والنص
-    overlay = Image.new(
-        "RGBA",
-        (W, H),
-        (0, 0, 0, 0),
-    )
-
-    draw = ImageDraw.Draw(overlay)
-
-    draw.rounded_rectangle(
-        (28, 35, W - 28, 115),
-        radius=25,
-        fill=(18, 22, 43, 225),
-        outline=(235, 204, 151, 255),
-        width=3,
-    )
-
-    draw.text(
-        (W // 2, 75),
-        title,
-        font=title_font,
-        fill=(255, 244, 219),
-        anchor="mm",
-        direction="rtl",
-        language="ar",
-    )
-
-    draw.rounded_rectangle(
-        (345, 140, 735, 200),
-        radius=22,
-        fill=(238, 177, 78, 245),
-    )
-
-    draw.text(
-        (W // 2, 170),
-        f"المشهد {scene_index + 1}",
-        font=small_font,
-        fill=(40, 30, 42),
-        anchor="mm",
-        direction="rtl",
-        language="ar",
-    )
-
-    draw.rounded_rectangle(
-        (28, 1430, W - 28, 1730),
-        radius=32,
-        fill=(15, 20, 37, 218),
-        outline=(236, 204, 157, 255),
-        width=4,
-    )
-
-    wrapped = wrap_arabic(
-        draw,
-        text,
-        font,
-        W - 105,
-    )
-
-    draw.multiline_text(
-        (W // 2, 1580),
-        wrapped,
-        font=font,
-        fill=(255, 249, 234),
-        anchor="mm",
-        align="center",
-        spacing=14,
-        direction="rtl",
-        language="ar",
-    )
-
-    count = scene_frames[scene_index]
-
-    for local_frame in range(count):
-        elapsed = frame_number / FPS
-
-        progress = local_frame / max(1, count - 1)
-        zoom = 1.0 + 0.035 * progress
-
-        frame = base.copy()
-
-        # الشخصية الأولى
-        frame = draw_character(
-            frame,
-            cx=310 + 15 * math.sin(elapsed * 0.8),
-            cy=560,
-            scale=1.03,
-            shirt_color=main_shirt,
-            hair_color=main_hair,
-            mood=moods[scene_index % len(moods)],
-            elapsed=elapsed,
-            role=0,
-        )
-
-        # الشخصية الثانية
-        frame = draw_character(
-            frame,
-            cx=710 - 13 * math.sin(elapsed * 0.8),
-            cy=600,
-            scale=0.82,
-            shirt_color=second_shirt,
-            hair_color=second_hair,
-            mood=(
-                "surprised"
-                if scene_index in (1, 2)
-                else "happy"
-            ),
-            elapsed=elapsed,
-            role=1,
-        )
-
-        frame = Image.alpha_composite(
-            frame.convert("RGBA"),
-            overlay,
-        ).convert("RGB")
-
-        # تقريب الكاميرا تدريجيًا
-        new_w = int(W * zoom)
-        new_h = int(H * zoom)
-
-        if new_w != W or new_h != H:
-            frame = frame.resize(
+            enlarged = base.resize(
                 (new_w, new_h),
                 Image.Resampling.LANCZOS,
             )
 
-            left = (new_w - W) // 2
-            top = (new_h - H) // 2
+            max_left = new_w - W
+            max_top = new_h - H
 
-            frame = frame.crop(
+            left = int(
+                max_left * (
+                    0.5 + 0.15 * math.sin(progress * math.pi)
+                )
+            )
+
+            top = int(
+                max_top * (
+                    0.5 + 0.15 * math.cos(progress * math.pi)
+                )
+            )
+
+            left = max(0, min(left, max_left))
+            top = max(0, min(top, max_top))
+
+            frame = enlarged.crop(
                 (left, top, left + W, top + H)
             )
 
-        frame.save(
-            FRAMES / f"{frame_number:05d}.jpg",
-            quality=93,
-            optimize=True,
-        )
+            frame = decorate_frame(
+                frame,
+                scene_text,
+                scene_index,
+                len(scenes),
+            )
 
-        frame_number += 1
+            # انتقال تدريجي بين المشاهد
+            if (
+                previous_scene_frame is not None
+                and local_frame < transition_frames
+            ):
+                alpha = (
+                    local_frame + 1
+                ) / transition_frames
 
+                frame = Image.blend(
+                    previous_scene_frame,
+                    frame,
+                    alpha,
+                )
 
-# =========================================================
-# تجميع الفيديو والصوت
-# =========================================================
-subprocess.run(
-    [
-        "ffmpeg", "-y",
-        "-framerate", str(FPS),
-        "-i", str(FRAMES / "%05d.jpg"),
-        "-i", str(OUT / "narration.wav"),
+            frame.save(
+                FRAMES / f"{frame_number:05d}.jpg",
+                quality=90,
+            )
 
-        "-map", "0:v:0",
-        "-map", "1:a:0",
+            scene_last_frame = frame
+            frame_number += 1
 
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-r", str(FPS),
+        previous_scene_frame = scene_last_frame
 
-        "-c:a", "aac",
-        "-b:a", "192k",
+    # تجميع الفيديو والصوت
+    output_video = OUT / "short.mp4"
 
-        "-af", "aresample=async=1:first_pts=0",
-
-        "-shortest",
-        "-movflags", "+faststart",
-
-        str(OUT / "short.mp4"),
-    ],
-    check=True,
-)
-
-print("Video created:", OUT / "short.mp4")
-
-print(
-    f"FPS: {FPS} | Frames: {frame_number} | "
-    f"Audio duration: {audio_duration:.2f}s"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-framerate", str(FPS),
+            "-i", str(FRAMES / "%05d.jpg"),
+            "-i", str(OUT / "narration.wav"),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-af", "aresample=async=1:first_pts=0",
+            "-shortest",
+            "-movflags", "+faststart",
+            str(output_video),
+        ],
+        check=True,
     )
+
+    print("Video created:", output_video)
+
+
+if __name__ == "__main__":
+    main()
