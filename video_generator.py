@@ -5,6 +5,7 @@ import subprocess
 import urllib.request
 import urllib.error
 import json
+import base64
 from io import BytesIO
 from pathlib import Path
 
@@ -32,50 +33,6 @@ FONT_BOLD = "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf"
 font = ImageFont.truetype(FONT_PATH, 30)
 title_font = ImageFont.truetype(FONT_BOLD, 36)
 small_font = ImageFont.truetype(FONT_BOLD, 23)
-
-
-# =========================
-# الشخصيات المعروفة
-# =========================
-
-CHARACTERS = {
-    "تفاحة": (
-        "a cute anthropomorphic red apple character, "
-        "small green leaf, expressive large eyes"
-    ),
-    "الفراولة": (
-        "a cute anthropomorphic red strawberry character, "
-        "tiny green leaves, expressive large eyes"
-    ),
-    "موزة": (
-        "a cute anthropomorphic yellow banana character, "
-        "friendly expressive face"
-    ),
-    "الليمونة": (
-        "a cute anthropomorphic yellow lemon character, "
-        "expressive eyes and a friendly face"
-    ),
-    "قطة صغيرة": (
-        "a small adorable orange kitten, expressive eyes"
-    ),
-    "كلب شقي": (
-        "a playful small cartoon puppy, expressive eyes"
-    ),
-    "ولد ذكي": (
-        "a clever Egyptian cartoon teenage boy, "
-        "short dark hair, casual clothes"
-    ),
-    "صاحبه": (
-        "another Egyptian cartoon teenage boy, "
-        "short dark hair, casual clothes"
-    ),
-    "أرنب": (
-        "a cute white cartoon rabbit, expressive eyes"
-    ),
-    "ثعلب": (
-        "an orange cartoon fox, expressive eyes"
-    ),
-}
 
 
 # =========================
@@ -129,7 +86,7 @@ scenes = [
     if text.strip()
 ]
 
-# ضمان عدم فقد القصة لو تنسيقها مختلف
+# التعامل مع تنسيقات القصص المختلفة
 if not scenes:
     scenes = [
         line.strip()
@@ -150,97 +107,139 @@ print(f"Scenes found: {len(scenes)}")
 
 
 # =========================
-# تجهيز وصف الشخصيات
+# تحليل القصة باستخدام Gemini
 # =========================
 
-found_characters = [
-    description
-    for name, description in CHARACTERS.items()
-    if name in title
-]
+def generate_scene_prompts(scenes, title):
+    api_key = os.environ.get("GEMINI_API_KEY")
 
-if not found_characters:
-    found_characters = [
-        "a cute expressive 3D cartoon character"
-    ]
-
-character_description = "; ".join(found_characters[:2])
-
-
-# =========================
-# تجهيز وصف مختلف لكل مشهد
-# =========================
-
-def build_prompt(index, scene_text):
-    scene_directions = [
-        (
-            "Show the main character enjoying an ordinary day "
-            "in a colorful Egyptian neighborhood, wide establishing shot."
-        ),
-        (
-            "Show the characters meeting unexpectedly in a Cairo street, "
-            "expressive faces, dynamic composition."
-        ),
-        (
-            "Show the main character discovering a mysterious problem, "
-            "dramatic lighting, suspenseful atmosphere."
-        ),
-        (
-            "Show a surprising revelation between the characters, "
-            "strong emotions, cinematic close-up."
-        ),
-        (
-            "Show a mysterious cliffhanger with a glowing object or "
-            "a strange discovery, dramatic cinematic composition."
-        ),
-    ]
-
-    direction = scene_directions[min(index, 4)]
-
-    # تفاصيل إضافية حسب أحداث القصة
-    if "صندوق" in scene_text:
-        direction += (
-            " Include a mysterious old box with a soft glowing light."
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY مش موجود في GitHub Secrets."
         )
 
-    if "منتصف الليل" in scene_text or "الليل" in scene_text:
-        direction += (
-            " It is nighttime, with moonlight and dramatic shadows."
-        )
+    client = genai.Client(api_key=api_key)
 
-    if "مسابقة" in scene_text:
-        direction += (
-            " Show a colorful competition stage and a small audience."
-        )
+    story_scenes = "\n".join(
+        f"Scene {i + 1}: {scene}"
+        for i, scene in enumerate(scenes)
+    )
 
-    if "سر" in scene_text or "الحقيقة" in scene_text:
-        direction += (
-            " Include a mysterious clue and surprised character expressions."
-        )
+    instructions = f"""
+You are an expert storyboard artist and visual director
+for high-quality 3D animated short films.
 
-    return f"""
-Create a polished, high-quality 3D animated movie frame.
+Your task is to turn an Egyptian Arabic story into a sequence
+of visually accurate image-generation prompts.
 
-Characters:
-{character_description}
+STORY TITLE:
+{title}
 
-Scene:
-{direction}
+COMPLETE STORY:
+{story_scenes}
 
-Story context:
-{scene_text}
+Create exactly {len(scenes)} image prompts.
 
-Visual requirements:
-- Consistent character designs and clothing across scenes.
-- Expressive faces and clear body language.
-- Detailed cinematic environment.
-- Professional 3D cartoon movie aesthetic.
-- Beautiful cinematic lighting and depth.
-- Rich colors and realistic soft shadows.
-- Portrait 9:16 composition.
-- Keep the main characters clearly visible.
-- No text, no captions, no letters, no watermark.
+CRITICAL STORY ACCURACY RULES:
+
+1. Each prompt must illustrate the actual events of its
+   corresponding scene.
+
+2. Never use generic scene descriptions that could belong
+   to any unrelated story.
+
+3. Identify the characters actually present in each scene.
+
+4. Describe what each character is physically doing.
+   Show the specific action, not merely the character standing.
+
+5. Describe facial expressions, emotions, body language,
+   camera angle, environment, and relevant objects.
+
+6. If a character discovers something, show the discovery.
+   If characters argue, show the confrontation.
+   If someone runs, show the movement.
+   If a character feels sad, show the emotional situation.
+
+7. Do not invent major events, characters, or objects
+   that contradict the story.
+
+CHARACTER CONSISTENCY:
+
+8. Establish consistent visual designs for recurring characters.
+
+9. Keep the same face, age, body proportions, hairstyle,
+   clothing, and colors whenever a character reappears.
+
+10. Include enough visual details in every prompt to help
+    maintain character consistency across separate images.
+
+VISUAL STYLE:
+
+11. High-quality polished 3D animated movie aesthetic.
+12. Expressive characters and natural body language.
+13. Detailed environments appropriate to the actual story.
+14. Cinematic composition and professional lighting.
+15. Rich colors, depth, and soft realistic shadows.
+16. Vertical portrait 9:16 composition.
+17. Keep important characters and actions clearly visible.
+18. No written text, subtitles, letters, logos, or watermarks.
+
+IMPORTANT:
+
+The image must communicate the main event of the scene
+even without reading the story text.
+
+Avoid unrelated Egyptian streets, random glowing objects,
+random boxes, or generic dramatic scenes unless the actual
+story specifically requires them.
+
+Return ONLY valid JSON in this format:
+
+{{
+  "prompts": [
+    "Detailed English image prompt for scene 1",
+    "Detailed English image prompt for scene 2"
+  ]
+}}
 """
+
+    response = client.models.generate_content(
+        model="gemini-3.8-flash",
+        contents=instructions,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.3,
+        ),
+    )
+
+    try:
+        result = json.loads(response.text)
+        prompts = result["prompts"]
+
+        if len(prompts) != len(scenes):
+            raise ValueError(
+                f"Expected {len(scenes)} prompts, "
+                f"received {len(prompts)}."
+            )
+
+        if not all(
+            isinstance(prompt, str) and prompt.strip()
+            for prompt in prompts
+        ):
+            raise ValueError("A scene prompt is empty.")
+
+        print("Gemini successfully analyzed the story.")
+
+        for i, prompt in enumerate(prompts):
+            print(f"Scene {i + 1} prompt: {prompt}")
+
+        return prompts
+
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(
+            f"Gemini returned invalid scene descriptions: {error}"
+        ) from error
 
 
 # =========================
@@ -253,9 +252,8 @@ def generate_image(prompt, index):
 
     if not account_id or not api_token:
         raise RuntimeError(
-            "تأكد من إضافة CLOUDFLARE_ACCOUNT_ID "
-            "وCLOUDFLARE_API_TOKEN في GitHub Secrets "
-            "وتمريرهما إلى خطوة تشغيل الفيديو."
+            "تأكد من وجود CLOUDFLARE_ACCOUNT_ID "
+            "وCLOUDFLARE_API_TOKEN في GitHub Secrets."
         )
 
     url = (
@@ -264,15 +262,24 @@ def generate_image(prompt, index):
         "@cf/bytedance/stable-diffusion-xl-lightning"
     )
 
+    visual_prompt = (
+        prompt
+        + "\nHigh-quality 3D animated movie still, "
+        "clear storytelling, coherent anatomy, "
+        "consistent character appearance, "
+        "portrait composition, no text."
+    )
+
     payload = {
-        "prompt": prompt,
+        "prompt": visual_prompt,
         "width": 576,
         "height": 1024,
         "num_steps": 4,
         "negative_prompt": (
             "blurry, low quality, distorted face, "
-            "extra limbs, extra fingers, duplicate characters, "
-            "text, letters, watermark"
+            "deformed anatomy, extra limbs, extra fingers, "
+            "duplicate characters, incorrect objects, "
+            "unrelated scene, text, letters, subtitles, watermark"
         ),
     }
 
@@ -294,12 +301,13 @@ def generate_image(prompt, index):
 
     except urllib.error.HTTPError as error:
         error_text = error.read().decode(
-            "utf-8", errors="replace"
+            "utf-8",
+            errors="replace",
         )
 
         raise RuntimeError(
             f"Cloudflare image generation failed "
-            f"(HTTP {error.code}): {error_text[:1000]}"
+            f"(HTTP {error.code}): {error_text[:1500]}"
         ) from error
 
     except urllib.error.URLError as error:
@@ -307,12 +315,54 @@ def generate_image(prompt, index):
             f"تعذر الاتصال بـ Cloudflare: {error.reason}"
         ) from error
 
+    # بعض استجابات واجهات الصور قد تكون JSON بدل الصورة مباشرة
+    content_type = ""
+
+    try:
+        content_type = response.headers.get("Content-Type", "")
+    except Exception:
+        pass
+
+    if "application/json" in content_type:
+        try:
+            result = json.loads(image_bytes.decode("utf-8"))
+
+            if not result.get("success", True):
+                raise RuntimeError(
+                    f"Cloudflare error: {result.get('errors')}"
+                )
+
+            image_data = result.get("result", {})
+
+            if isinstance(image_data, dict):
+                image_value = (
+                    image_data.get("image")
+                    or image_data.get("output")
+                )
+
+                if isinstance(image_value, list):
+                    image_value = image_value[0] if image_value else None
+
+                if isinstance(image_value, str):
+                    image_bytes = base64.b64decode(image_value)
+                else:
+                    raise ValueError(
+                        "لم يتم العثور على بيانات الصورة في الاستجابة."
+                    )
+            else:
+                raise ValueError("تنسيق استجابة الصورة غير متوقع.")
+
+        except Exception as error:
+            raise RuntimeError(
+                f"Cloudflare returned an invalid image response: {error}"
+            ) from error
+
     try:
         image = Image.open(BytesIO(image_bytes)).convert("RGB")
     except Exception as error:
         raise RuntimeError(
             "Cloudflare لم يرجع صورة صالحة. "
-            "راجع رسالة الخطأ وحدود الاستخدام."
+            "راجع استجابة API وحدود الاستخدام."
         ) from error
 
     IMAGES.mkdir(parents=True, exist_ok=True)
@@ -433,6 +483,7 @@ def wrap_arabic(draw, text, selected_font, max_width):
 
 def decorate_frame(image, scene_text, scene_index, total_scenes):
     frame = image.convert("RGB")
+
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
@@ -444,7 +495,10 @@ def decorate_frame(image, scene_text, scene_index, total_scenes):
     )
 
     title_text = wrap_arabic(
-        draw, title, title_font, W - 70
+        draw,
+        title,
+        title_font,
+        W - 70,
     )
 
     draw.multiline_text(
@@ -475,7 +529,7 @@ def decorate_frame(image, scene_text, scene_index, total_scenes):
         language="ar",
     )
 
-    # لوحة التعليق المكتوب
+    # لوحة النص
     draw.rounded_rectangle(
         (24, 865, W - 24, 1235),
         radius=30,
@@ -485,7 +539,10 @@ def decorate_frame(image, scene_text, scene_index, total_scenes):
     )
 
     wrapped_text = wrap_arabic(
-        draw, scene_text, font, W - 90
+        draw,
+        scene_text,
+        font,
+        W - 90,
     )
 
     draw.multiline_text(
@@ -501,7 +558,8 @@ def decorate_frame(image, scene_text, scene_index, total_scenes):
     )
 
     return Image.alpha_composite(
-        frame.convert("RGBA"), overlay
+        frame.convert("RGBA"),
+        overlay,
     ).convert("RGB")
 
 
@@ -512,7 +570,7 @@ def decorate_frame(image, scene_text, scene_index, total_scenes):
 def main():
     narration = " ".join(scenes)
 
-    # إنشاء الصوت أولًا لمعرفة مدته
+    # إنشاء الصوت أولًا
     make_voice(narration)
 
     probe = subprocess.run(
@@ -535,8 +593,12 @@ def main():
         round(audio_duration * FPS),
     )
 
-    # توزيع مدة الفيديو على المشاهد حسب طول النص
-    weights = [max(1, len(scene.split())) for scene in scenes]
+    # توزيع مدة الفيديو حسب طول كل مشهد
+    weights = [
+        max(1, len(scene.split()))
+        for scene in scenes
+    ]
+
     weight_total = sum(weights)
 
     frame_counts = [
@@ -555,16 +617,22 @@ def main():
     for folder in (FRAMES, IMAGES):
         if folder.exists():
             shutil.rmtree(folder)
+
         folder.mkdir(parents=True, exist_ok=True)
 
-    # توليد صورة مستقلة لكل مشهد
+    # تحليل أحداث القصة وإنشاء وصف مخصص لكل مشهد
+    print("Analyzing story scenes with Gemini...")
+
+    scene_prompts = generate_scene_prompts(scenes, title)
+
+    # توليد صورة مستقلة لكل مشهد باستخدام Cloudflare
     scene_images = []
 
-    for index, scene_text in enumerate(scenes):
-        prompt = build_prompt(index, scene_text)
+    for index, prompt in enumerate(scene_prompts):
         path = generate_image(prompt, index)
         scene_images.append(path)
 
+    # إنشاء الإطارات وحركة الكاميرا
     frame_number = 0
     previous_scene_frame = None
     transition_frames = max(1, FPS // 3)
@@ -572,7 +640,9 @@ def main():
     for scene_index, (scene_text, image_path, count) in enumerate(
         zip(scenes, scene_images, frame_counts)
     ):
-        print(f"Rendering scene {scene_index + 1}/{len(scenes)}")
+        print(
+            f"Rendering scene {scene_index + 1}/{len(scenes)}"
+        )
 
         source = Image.open(image_path).convert("RGB")
 
@@ -587,7 +657,7 @@ def main():
         for local_frame in range(count):
             progress = local_frame / max(1, count - 1)
 
-            # حركة تقريب تدريجية مع تحريك بسيط للكاميرا
+            # تقريب تدريجي للكاميرا
             zoom = 1.0 + 0.075 * progress
 
             new_w = int(W * zoom)
