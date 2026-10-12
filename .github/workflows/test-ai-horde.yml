@@ -1,0 +1,35 @@
+name: Test AI Horde Image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Generate test image
+        run: python test_ai_horde.py
+
+      - name: Upload generated image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-horde-test-image
+          path: output/ai_horde_test.webp
+          retention-days: 3
