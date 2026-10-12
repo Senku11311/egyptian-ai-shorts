@@ -1,0 +1,124 @@
+import base64
+import time
+import requests
+from pathlib import Path
+
+BASE_URL = "https://aihorde.net/api/v2"
+
+HEADERS = {
+    "apikey": "0000000000",
+    "Client-Agent": "SenkuAIShorts:1.0:github-actions",
+}
+
+prompt = """
+High quality 3D animated cartoon movie scene, portrait composition.
+An Egyptian teenage boy with short dark hair, wearing a blue hoodie,
+opens an old wooden door and discovers a tiny glowing golden kitten
+inside a mysterious room. The boy looks surprised, eyes wide open.
+The golden kitten is clearly visible in the room.
+Detailed cinematic lighting, beautiful colors, expressive characters,
+professional animated film aesthetic, rich environment, depth of field.
+One clear scene that tells a story, no text, no letters, no watermark.
+"""
+
+payload = {
+    "prompt": prompt + "### blurry, low quality, text, watermark, "
+                       "distorted face, extra limbs",
+    "params": {
+        "width": 512,
+        "height": 768,
+        "steps": 20,
+        "n": 1,
+        "cfg_scale": 7,
+        "sampler_name": "k_euler",
+    },
+    "models": ["Deliberate"],
+    "r2": True,
+    "nsfw": False,
+    "censor_nsfw": True,
+}
+
+print("Submitting image generation request...")
+
+response = requests.post(
+    f"{BASE_URL}/generate/async",
+    headers=HEADERS,
+    json=payload,
+    timeout=60,
+)
+response.raise_for_status()
+
+job = response.json()
+job_id = job.get("id")
+
+if not job_id:
+    raise RuntimeError(f"No job ID returned: {job}")
+
+print("Job submitted:", job_id)
+print("Waiting for an available image-generation worker...")
+
+deadline = time.time() + 900
+
+while time.time() < deadline:
+    response = requests.get(
+        f"{BASE_URL}/generate/check/{job_id}",
+        headers=HEADERS,
+        timeout=30,
+    )
+    response.raise_for_status()
+    status = response.json()
+
+    if status.get("faulted"):
+        raise RuntimeError(f"Image generation failed: {status}")
+
+    if status.get("done"):
+        break
+
+    print(
+        "Waiting...",
+        "queue:",
+        status.get("queue_position", "unknown"),
+    )
+    time.sleep(10)
+else:
+    raise TimeoutError(
+        "No image was ready after 15 minutes. "
+        "The public queue may be busy."
+    )
+
+response = requests.get(
+    f"{BASE_URL}/generate/status/{job_id}",
+    headers=HEADERS,
+    timeout=60,
+)
+response.raise_for_status()
+
+result = response.json()
+generations = result.get("generations", [])
+
+if not generations:
+    raise RuntimeError(f"No image returned: {result}")
+
+image_data = generations[0].get("img")
+
+if not image_data:
+    raise RuntimeError("The generated image data is missing.")
+
+if image_data.startswith("http://") or image_data.startswith("https://"):
+    image_response = requests.get(image_data, timeout=60)
+    image_response.raise_for_status()
+    image_bytes = image_response.content
+else:
+    if image_data.startswith("data:"):
+        image_data = image_data.split(",", 1)[1]
+
+    image_bytes = base64.b64decode(image_data)
+
+output = Path("output")
+output.mkdir(exist_ok=True)
+
+image_path = output / "ai_horde_test.webp"
+image_path.write_bytes(image_bytes)
+
+print("SUCCESS! Image saved:", image_path)
+print("Image size:", len(image_bytes), "bytes")
