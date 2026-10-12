@@ -8,8 +8,14 @@ from google import genai
 from google.genai import types
 from PIL import Image, ImageDraw, ImageFont
 
+
+# ==========================================
+# إعدادات الفيديو
+# ==========================================
+
 W, H = 720, 1280
-FPS = 12
+FPS = 15
+
 OUT = Path("output")
 FRAMES = OUT / "frames"
 
@@ -18,43 +24,55 @@ OUT.mkdir(exist_ok=True)
 FONT_PATH = "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf"
 
-font = ImageFont.truetype(FONT_PATH, 43)
-title_font = ImageFont.truetype(FONT_BOLD, 57)
+font = ImageFont.truetype(FONT_PATH, 39)
+title_font = ImageFont.truetype(FONT_BOLD, 49)
 small_font = ImageFont.truetype(FONT_BOLD, 25)
 
+
+# ==========================================
+# قراءة القصة
+# ==========================================
+
 story_file = OUT / "story.txt"
+
 if not story_file.exists():
-    raise FileNotFoundError("ملف القصة مش موجود!")
+    raise FileNotFoundError("ملف output/story.txt مش موجود!")
 
 story = story_file.read_text(encoding="utf-8")
 
+title = "حكاية كرتونية"
 lines = []
-for line in story.splitlines():
-    line = line.strip()
+reading_scenes = False
+
+for raw_line in story.splitlines():
+    line = raw_line.strip()
+
     if not line:
         continue
+
     if line.startswith("عنوان القصة:"):
+        title = line.split(":", 1)[1].strip()
         continue
+
     if line.startswith("المشهد"):
+        reading_scenes = True
         continue
-    if line in ("النهاية:", "يتبع... لو عايز تعرف باقي الحكاية!"):
-        continue
-    lines.append(line)
+
+    if line == "النهاية:":
+        break
+
+    if reading_scenes:
+        lines.append(line)
+
+if not lines:
+    raise ValueError("ملقيناش مشاهد صالحة في ملف القصة!")
 
 lines = lines[:5]
 
-if not lines:
-    raise ValueError("مفيش مشاهد صالحة في القصة!")
 
-# خلفيات مختلفة للمشاهد
-backgrounds = [
-    ((255, 220, 170), (255, 145, 125)),
-    ((150, 210, 255), (105, 130, 220)),
-    ((180, 240, 195), (60, 165, 150)),
-    ((255, 195, 220), (210, 115, 180)),
-    ((210, 190, 255), (115, 100, 205)),
-]
-
+# ==========================================
+# أدوات الرسم
+# ==========================================
 
 def wrap_arabic(draw, text, selected_font, max_width):
     words = text.split()
@@ -63,12 +81,16 @@ def wrap_arabic(draw, text, selected_font, max_width):
 
     for word in words:
         candidate = f"{current} {word}".strip()
-        width = draw.textbbox(
+
+        bbox = draw.textbbox(
             (0, 0),
             candidate,
             font=selected_font,
             direction="rtl",
-        )[2]
+            language="ar",
+        )
+
+        width = bbox[2] - bbox[0]
 
         if width <= max_width or not current:
             current = candidate
@@ -82,154 +104,395 @@ def wrap_arabic(draw, text, selected_font, max_width):
     return "\n".join(result)
 
 
-def draw_character(draw, kind, cx, cy, bob):
-    cy += bob
+def lerp_color(a, b, t):
+    return tuple(
+        int(a[i] * (1 - t) + b[i] * t)
+        for i in range(3)
+    )
 
-    if kind == 0:
-        # فاكهة كرتونية
+
+# ==========================================
+# خلفيات سينمائية
+# ==========================================
+
+backgrounds = [
+    ((20, 30, 68), (110, 65, 112)),
+    ((18, 70, 105), (45, 125, 150)),
+    ((55, 35, 85), (170, 80, 100)),
+    ((25, 48, 75), (100, 105, 145)),
+    ((45, 35, 70), (190, 105, 90)),
+]
+
+
+def make_background(scene_index):
+    top, bottom = backgrounds[
+        scene_index % len(backgrounds)
+    ]
+
+    img = Image.new("RGB", (W, H))
+    draw = ImageDraw.Draw(img)
+
+    # تدرج رأسي ناعم
+    for y in range(H):
+        color = lerp_color(top, bottom, y / H)
+        draw.line((0, y, W, y), fill=color)
+
+    # إضاءة سينمائية خلف الشخصيات
+    draw.ellipse(
+        (120, 170, 600, 650),
+        fill=lerp_color(top, (225, 185, 155), 0.22),
+    )
+
+    # نجوم صغيرة
+    for i in range(28):
+        x = (i * 127 + scene_index * 53) % W
+        y = (i * 173 + 85) % 700
+        radius = 2 + i % 3
+
         draw.ellipse(
-            (cx - 105, cy - 110, cx + 105, cy + 110),
-            fill=(245, 75, 75),
-            outline=(125, 40, 50),
-            width=6,
-        )
-        draw.ellipse(
-            (cx - 25, cy - 145, cx + 8, cy - 95),
-            fill=(65, 125, 55),
-        )
-        draw.ellipse(
-            (cx - 48, cy - 30, cx - 20, cy + 2),
-            fill="black",
-        )
-        draw.ellipse(
-            (cx + 20, cy - 30, cx + 48, cy + 2),
-            fill="black",
-        )
-        draw.arc(
-            (cx - 42, cy - 5, cx + 42, cy + 65),
-            start=5,
-            end=175,
-            fill="black",
-            width=7,
-        )
-        draw.ellipse(
-            (cx - 75, cy + 5, cx - 45, cy + 25),
-            fill=(255, 155, 155),
-        )
-        draw.ellipse(
-            (cx + 45, cy + 5, cx + 75, cy + 25),
-            fill=(255, 155, 155),
+            (
+                x - radius,
+                y - radius,
+                x + radius,
+                y + radius,
+            ),
+            fill=(235, 230, 220),
         )
 
-    elif kind == 1:
-        # إنسان كرتوني
-        draw.rounded_rectangle(
-            (cx - 90, cy + 45, cx + 90, cy + 235),
-            radius=45,
-            fill=(70, 115, 230),
-            outline=(35, 55, 125),
-            width=5,
+    # مبانٍ بعيدة لإضافة العمق
+    for i in range(9):
+        x = i * 95 - 15
+        height = 100 + (i * 37 % 100)
+
+        draw.rectangle(
+            (
+                x,
+                760 - height,
+                x + 75,
+                790,
+            ),
+            fill=(30, 35, 65),
         )
+
+        # نوافذ
+        for wy in range(700 - height, 770, 35):
+            for wx in range(x + 12, x + 65, 28):
+                draw.rectangle(
+                    (wx, wy, wx + 8, wy + 12),
+                    fill=(210, 180, 120),
+                )
+
+    # أرضية المشهد
+    draw.ellipse(
+        (-120, 720, W + 120, 1050),
+        fill=(27, 32, 60),
+    )
+
+    # خط أرضي مضيء
+    draw.arc(
+        (-100, 690, W + 100, 1010),
+        start=180,
+        end=360,
+        fill=(100, 130, 175),
+        width=4,
+    )
+
+    return img
+
+
+# ==========================================
+# الشخصيات الكرتونية
+# ==========================================
+
+def draw_character(
+    draw,
+    cx,
+    cy,
+    scale,
+    shirt_color,
+    hair_color,
+    mood,
+    movement,
+):
+    cx = int(cx)
+    cy = int(cy + movement)
+
+    outline = (35, 28, 45)
+
+    # تحريك الذراعين بصورة بسيطة
+    arm_shift = int(12 * math.sin(movement / 4))
+
+    # الرجلان
+    draw.line(
+        (
+            cx - 30 * scale,
+            cy + 195 * scale,
+            cx - 42 * scale,
+            cy + 245 * scale,
+        ),
+        fill=outline,
+        width=max(4, int(15 * scale)),
+    )
+
+    draw.line(
+        (
+            cx + 30 * scale,
+            cy + 195 * scale,
+            cx + 42 * scale,
+            cy + 245 * scale,
+        ),
+        fill=outline,
+        width=max(4, int(15 * scale)),
+    )
+
+    # الجسم
+    draw.rounded_rectangle(
+        (
+            cx - 70 * scale,
+            cy + 45 * scale,
+            cx + 70 * scale,
+            cy + 205 * scale,
+        ),
+        radius=int(28 * scale),
+        fill=shirt_color,
+        outline=outline,
+        width=max(3, int(5 * scale)),
+    )
+
+    # الذراعان
+    draw.line(
+        (
+            cx - 65 * scale,
+            cy + 75 * scale,
+            cx - 95 * scale,
+            cy + (130 + arm_shift) * scale,
+        ),
+        fill=outline,
+        width=max(5, int(18 * scale)),
+    )
+
+    draw.line(
+        (
+            cx + 65 * scale,
+            cy + 75 * scale,
+            cx + 95 * scale,
+            cy + (130 - arm_shift) * scale,
+        ),
+        fill=outline,
+        width=max(5, int(18 * scale)),
+    )
+
+    # الرقبة
+    draw.rectangle(
+        (
+            cx - 18 * scale,
+            cy + 20 * scale,
+            cx + 18 * scale,
+            cy + 65 * scale,
+        ),
+        fill=(225, 165, 125),
+    )
+
+    # الرأس
+    radius = 70 * scale
+
+    draw.ellipse(
+        (
+            cx - radius,
+            cy - radius,
+            cx + radius,
+            cy + radius,
+        ),
+        fill=(245, 190, 150),
+        outline=outline,
+        width=max(3, int(5 * scale)),
+    )
+
+    # الشعر
+    draw.pieslice(
+        (
+            cx - radius - 3,
+            cy - radius - 10,
+            cx + radius + 3,
+            cy + 35 * scale,
+        ),
+        start=180,
+        end=360,
+        fill=hair_color,
+    )
+
+    eye_y = cy - 8 * scale
+    eye_offset = 25 * scale
+    eye_radius = max(3, int(7 * scale))
+
+    # تعبيرات الوجه
+    if mood == "surprised":
+        for ex in (
+            cx - eye_offset,
+            cx + eye_offset,
+        ):
+            draw.ellipse(
+                (
+                    ex - eye_radius - 3,
+                    eye_y - eye_radius - 4,
+                    ex + eye_radius + 3,
+                    eye_y + eye_radius + 4,
+                ),
+                fill=(255, 255, 255),
+                outline=outline,
+                width=2,
+            )
+
+            draw.ellipse(
+                (
+                    ex - 3,
+                    eye_y - 3,
+                    ex + 3,
+                    eye_y + 3,
+                ),
+                fill=outline,
+            )
+
         draw.ellipse(
-            (cx - 90, cy - 100, cx + 90, cy + 100),
-            fill=(245, 190, 145),
-            outline=(120, 80, 65),
-            width=5,
+            (
+                cx - 9 * scale,
+                cy + 22 * scale,
+                cx + 9 * scale,
+                cy + 43 * scale,
+            ),
+            fill=(95, 35, 40),
         )
-        draw.pieslice(
-            (cx - 95, cy - 120, cx + 95, cy + 15),
-            start=180,
-            end=360,
-            fill=(65, 40, 30),
+
+    elif mood == "worried":
+        for ex in (
+            cx - eye_offset,
+            cx + eye_offset,
+        ):
+            draw.ellipse(
+                (
+                    ex - eye_radius,
+                    eye_y - eye_radius,
+                    ex + eye_radius,
+                    eye_y + eye_radius,
+                ),
+                fill=outline,
+            )
+
+        draw.line(
+            (
+                cx - 42 * scale,
+                cy - 30 * scale,
+                cx - 15 * scale,
+                cy - 35 * scale,
+            ),
+            fill=outline,
+            width=max(2, int(4 * scale)),
         )
-        draw.ellipse(
-            (cx - 42, cy - 15, cx - 18, cy + 12),
-            fill="black",
+
+        draw.line(
+            (
+                cx + 15 * scale,
+                cy - 35 * scale,
+                cx + 42 * scale,
+                cy - 30 * scale,
+            ),
+            fill=outline,
+            width=max(2, int(4 * scale)),
         )
-        draw.ellipse(
-            (cx + 18, cy - 15, cx + 42, cy + 12),
-            fill="black",
-        )
+
         draw.arc(
-            (cx - 35, cy + 5, cx + 35, cy + 55),
-            start=5,
-            end=175,
-            fill=(100, 40, 35),
-            width=5,
+            (
+                cx - 23 * scale,
+                cy + 30 * scale,
+                cx + 23 * scale,
+                cy + 55 * scale,
+            ),
+            start=200,
+            end=340,
+            fill=outline,
+            width=max(2, int(4 * scale)),
+        )
+
+    elif mood == "sad":
+        for ex in (
+            cx - eye_offset,
+            cx + eye_offset,
+        ):
+            draw.ellipse(
+                (
+                    ex - eye_radius,
+                    eye_y - eye_radius,
+                    ex + eye_radius,
+                    eye_y + eye_radius,
+                ),
+                fill=outline,
+            )
+
+        draw.arc(
+            (
+                cx - 25 * scale,
+                cy + 30 * scale,
+                cx + 25 * scale,
+                cy + 65 * scale,
+            ),
+            start=200,
+            end=340,
+            fill=outline,
+            width=max(2, int(4 * scale)),
         )
 
     else:
-        # حيوان كرتوني يشبه القطة
-        draw.polygon(
-            [
-                (cx - 90, cy - 35),
-                (cx - 75, cy - 130),
-                (cx - 15, cy - 65),
-            ],
-            fill=(245, 170, 95),
-            outline=(110, 70, 40),
-        )
-        draw.polygon(
-            [
-                (cx + 90, cy - 35),
-                (cx + 75, cy - 130),
-                (cx + 15, cy - 65),
-            ],
-            fill=(245, 170, 95),
-            outline=(110, 70, 40),
-        )
-        draw.ellipse(
-            (cx - 95, cy - 90, cx + 95, cy + 105),
-            fill=(250, 195, 125),
-            outline=(125, 85, 50),
-            width=5,
-        )
-        draw.ellipse(
-            (cx - 45, cy - 15, cx - 20, cy + 12),
-            fill="black",
-        )
-        draw.ellipse(
-            (cx + 20, cy - 15, cx + 45, cy + 12),
-            fill="black",
-        )
-        draw.polygon(
-            [
-                (cx - 12, cy + 20),
-                (cx + 12, cy + 20),
-                (cx, cy + 35),
-            ],
-            fill=(210, 80, 100),
-        )
-        draw.arc(
-            (cx - 35, cy + 25, cx, cy + 60),
-            start=0,
-            end=120,
-            fill="black",
-            width=4,
-        )
-        draw.arc(
-            (cx, cy + 25, cx + 35, cy + 60),
-            start=60,
-            end=180,
-            fill="black",
-            width=4,
-        )
-
-        for offset in (-1, 1):
-            draw.line(
+        for ex in (
+            cx - eye_offset,
+            cx + eye_offset,
+        ):
+            draw.ellipse(
                 (
-                    cx + offset * 35,
-                    cy + 30,
-                    cx + offset * 100,
-                    cy + 15,
+                    ex - eye_radius,
+                    eye_y - eye_radius,
+                    ex + eye_radius,
+                    eye_y + eye_radius,
                 ),
-                fill=(90, 65, 50),
-                width=3,
+                fill=outline,
             )
 
+        draw.arc(
+            (
+                cx - 28 * scale,
+                cy + 5 * scale,
+                cx + 28 * scale,
+                cy + 50 * scale,
+            ),
+            start=5,
+            end=175,
+            fill=outline,
+            width=max(2, int(5 * scale)),
+        )
+
+    # الخدود
+    cheek_y = cy + 12 * scale
+
+    for side in (-1, 1):
+        cheek_x = cx + side * 42 * scale
+
+        draw.ellipse(
+            (
+                cheek_x - 8 * scale,
+                cheek_y - 5 * scale,
+                cheek_x + 8 * scale,
+                cheek_y + 5 * scale,
+            ),
+            fill=(240, 125, 135),
+        )
+
+
+# ==========================================
+# توليد الصوت باستخدام Gemini
+# ==========================================
 
 def make_voice(text):
     api_key = os.environ.get("GEMINI_API_KEY")
+
     if not api_key:
         raise RuntimeError(
             "GEMINI_API_KEY مش موجود في GitHub Secrets."
@@ -284,13 +547,12 @@ def make_voice(text):
 
     if not audio_data:
         raise RuntimeError(
-            "Gemini ملقاش صوت في الاستجابة. راجع الموديل وحدود الـ API."
+            "Gemini ملقاش صوت في الاستجابة."
         )
 
     audio_path = OUT / "narration.wav"
     audio_path.write_bytes(audio_data)
 
-    # التأكد إن الملف الناتج WAV صالح
     probe = subprocess.run(
         [
             "ffprobe",
@@ -305,120 +567,200 @@ def make_voice(text):
 
     if probe.returncode != 0:
         raise RuntimeError(
-            "Gemini رجّع ملف صوت غير صالح: " + probe.stderr[-1000:]
+            "ملف الصوت غير صالح: " + probe.stderr[-1000:]
         )
 
-    print("Voice generated:", audio_path)
+    return float(probe.stdout.strip())
 
+
+# ==========================================
+# تجهيز الصوت وتوقيت المشاهد
+# ==========================================
 
 narration = " ".join(lines)
-make_voice(narration)
 
-# معرفة مدة التعليق الصوتي
-probe = subprocess.run(
-    [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(OUT / "narration.wav"),
-    ],
-    capture_output=True,
-    text=True,
-    check=True,
+audio_duration = make_voice(narration)
+
+weights = [
+    max(1, len(line.split()))
+    for line in lines
+]
+
+total_words = sum(weights)
+
+# توزيع وقت الفيديو حسب طول كل مشهد
+target_frames = max(
+    len(lines) * FPS * 2,
+    round(audio_duration * FPS),
 )
 
-audio_duration = float(probe.stdout.strip())
-scene_duration = max(3.5, audio_duration / len(lines))
-frames_per_scene = math.ceil(scene_duration * FPS)
+scene_frames = [
+    max(
+        FPS * 2,
+        round(target_frames * weight / total_words),
+    )
+    for weight in weights
+]
+
+# ضبط المجموع على مدة الفيديو المستهدفة
+difference = target_frames - sum(scene_frames)
+
+scene_frames[-1] += difference
+
+if scene_frames[-1] < FPS:
+    scene_frames[-1] = FPS
+
+
+# ==========================================
+# إنشاء الإطارات
+# ==========================================
 
 if FRAMES.exists():
     shutil.rmtree(FRAMES)
 
 FRAMES.mkdir(parents=True)
 
+# تعبيرات الوجه حسب تطور القصة
+moods = [
+    "happy",
+    "worried",
+    "surprised",
+    "worried",
+    "happy",
+]
+
+# ألوان ثابتة للشخصيتين
+main_shirt = (235, 90, 90)
+main_hair = (65, 40, 32)
+
+second_shirt = (70, 145, 235)
+second_hair = (45, 35, 30)
+
 frame_number = 0
 
 for scene_index, text in enumerate(lines):
-    top_color, bottom_color = backgrounds[
-        scene_index % len(backgrounds)
-    ]
 
-    # خلفية متدرجة
-    base = Image.new("RGB", (W, H))
-    pixels = base.load()
-
-    for y in range(H):
-        t = y / H
-        color = tuple(
-            int(top_color[c] * (1 - t) + bottom_color[c] * t)
-            for c in range(3)
-        )
-
-        for x in range(W):
-            pixels[x, y] = color
+    base = make_background(scene_index)
 
     draw = ImageDraw.Draw(base)
 
-    # دوائر زخرفية
-    draw.ellipse((35, 160, 115, 240), fill=(255, 255, 255))
-    draw.ellipse((585, 230, 655, 300), fill=(255, 255, 255))
-    draw.ellipse((65, 570, 125, 630), fill=(255, 255, 255))
-    draw.ellipse((585, 610, 645, 670), fill=(255, 255, 255))
-
-    # لوحة النص
+    # عنوان القصة
     draw.rounded_rectangle(
-        (35, 820, W - 35, 1120),
-        radius=35,
-        fill=(255, 250, 240),
-        outline=(55, 45, 80),
+        (28, 35, W - 28, 115),
+        radius=25,
+        fill=(22, 25, 50),
+        outline=(225, 205, 170),
+        width=3,
+    )
+
+    draw.text(
+        (W // 2, 75),
+        title,
+        font=title_font,
+        fill=(255, 245, 220),
+        anchor="mm",
+        direction="rtl",
+        language="ar",
+    )
+
+    # رقم المشهد
+    draw.rounded_rectangle(
+        (245, 140, 475, 190),
+        radius=22,
+        fill=(235, 175, 75),
+    )
+
+    draw.text(
+        (W // 2, 165),
+        f"المشهد {scene_index + 1}",
+        font=small_font,
+        fill=(40, 30, 45),
+        anchor="mm",
+        direction="rtl",
+        language="ar",
+    )
+
+    # لوحة الترجمة
+    draw.rounded_rectangle(
+        (28, 900, W - 28, 1170),
+        radius=30,
+        fill=(255, 250, 238),
+        outline=(225, 205, 170),
         width=4,
     )
 
-    wrapped = wrap_arabic(draw, text, font, W - 110)
+    wrapped = wrap_arabic(
+        draw,
+        text,
+        font,
+        W - 105,
+    )
 
     draw.multiline_text(
-        (W // 2, 970),
+        (W // 2, 1035),
         wrapped,
         font=font,
         fill=(35, 35, 55),
         anchor="mm",
         align="center",
-        spacing=16,
+        spacing=12,
         direction="rtl",
         language="ar",
     )
 
-    draw.text(
-        (W // 2, 120),
-        "حكايات كرتونية",
-        font=small_font,
-        fill=(255, 255, 255),
-        anchor="mm",
-    )
+    mood = moods[
+        min(scene_index, len(moods) - 1)
+    ]
 
-    # نوع الشخصية يتغير بين الفاكهة والإنسان والحيوان
-    kind = scene_index % 3
+    count = scene_frames[scene_index]
 
-    for local_frame in range(frames_per_scene):
-        progress = local_frame / max(1, frames_per_scene - 1)
+    for local_frame in range(count):
 
-        # حركة صعود وهبوط خفيفة
-        bob = int(10 * math.sin(progress * math.pi * 4))
+        progress = local_frame / max(1, count - 1)
+
+        # حركة رأسية ناعمة
+        bob = 8 * math.sin(progress * math.pi * 4)
+
+        # حركة بسيطة بين الشخصيتين
+        sway = 10 * math.sin(progress * math.pi * 2)
 
         frame = base.copy()
         frame_draw = ImageDraw.Draw(frame)
 
+        # الشخصية الأولى
         draw_character(
             frame_draw,
-            kind,
-            W // 2,
-            420,
-            bob,
+            cx=235 + sway,
+            cy=490,
+            scale=0.88,
+            shirt_color=main_shirt,
+            hair_color=main_hair,
+            mood=mood,
+            movement=bob,
         )
 
-        # حركة كاميرا تقريب تدريجي
-        zoom = 1.0 + 0.055 * progress
+        # الشخصية الثانية تظهر في جميع المشاهد
+        # مع الحفاظ على شكلها وألوانها
+        second_mood = (
+            "surprised"
+            if mood == "surprised"
+            else "happy"
+        )
+
+        draw_character(
+            frame_draw,
+            cx=490 - sway,
+            cy=525,
+            scale=0.70,
+            shirt_color=second_shirt,
+            hair_color=second_hair,
+            mood=second_mood,
+            movement=-bob,
+        )
+
+        # تقريب كاميرا تدريجي
+        zoom = 1.0 + 0.025 * progress
+
         new_w = int(W * zoom)
         new_h = int(H * zoom)
 
@@ -436,26 +778,40 @@ for scene_index, text in enumerate(lines):
 
         frame.save(
             FRAMES / f"{frame_number:05d}.jpg",
-            quality=90,
+            quality=92,
         )
+
         frame_number += 1
 
-# تجميع الإطارات في فيديو
+
+# ==========================================
+# تجميع الفيديو والصوت
+# ==========================================
+
 subprocess.run(
     [
         "ffmpeg", "-y",
         "-framerate", str(FPS),
         "-i", str(FRAMES / "%05d.jpg"),
         "-i", str(OUT / "narration.wav"),
+
         "-map", "0:v:0",
         "-map", "1:a:0",
+
         "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "20",
         "-pix_fmt", "yuv420p",
+        "-r", str(FPS),
+
         "-c:a", "aac",
         "-b:a", "192k",
+
         "-af", "aresample=async=1:first_pts=0",
+
         "-shortest",
         "-movflags", "+faststart",
+
         str(OUT / "short.mp4"),
     ],
     check=True,
