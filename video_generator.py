@@ -1,10 +1,11 @@
-import asyncio
 import subprocess
 import shutil
 import math
+import os
 from pathlib import Path
 
-import edge_tts
+from google import genai
+from google.genai import types
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 720, 1280
@@ -63,7 +64,10 @@ def wrap_arabic(draw, text, selected_font, max_width):
     for word in words:
         candidate = f"{current} {word}".strip()
         width = draw.textbbox(
-            (0, 0), candidate, font=selected_font, direction="rtl"
+            (0, 0),
+            candidate,
+            font=selected_font,
+            direction="rtl",
         )[2]
 
         if width <= max_width or not current:
@@ -138,8 +142,14 @@ def draw_character(draw, kind, cx, cy, bob):
             end=360,
             fill=(65, 40, 30),
         )
-        draw.ellipse((cx - 42, cy - 15, cx - 18, cy + 12), fill="black")
-        draw.ellipse((cx + 18, cy - 15, cx + 42, cy + 12), fill="black")
+        draw.ellipse(
+            (cx - 42, cy - 15, cx - 18, cy + 12),
+            fill="black",
+        )
+        draw.ellipse(
+            (cx + 18, cy - 15, cx + 42, cy + 12),
+            fill="black",
+        )
         draw.arc(
             (cx - 35, cy + 5, cx + 35, cy + 55),
             start=5,
@@ -151,14 +161,20 @@ def draw_character(draw, kind, cx, cy, bob):
     else:
         # حيوان كرتوني يشبه القطة
         draw.polygon(
-            [(cx - 90, cy - 35), (cx - 75, cy - 130),
-             (cx - 15, cy - 65)],
+            [
+                (cx - 90, cy - 35),
+                (cx - 75, cy - 130),
+                (cx - 15, cy - 65),
+            ],
             fill=(245, 170, 95),
             outline=(110, 70, 40),
         )
         draw.polygon(
-            [(cx + 90, cy - 35), (cx + 75, cy - 130),
-             (cx + 15, cy - 65)],
+            [
+                (cx + 90, cy - 35),
+                (cx + 75, cy - 130),
+                (cx + 15, cy - 65),
+            ],
             fill=(245, 170, 95),
             outline=(110, 70, 40),
         )
@@ -168,11 +184,20 @@ def draw_character(draw, kind, cx, cy, bob):
             outline=(125, 85, 50),
             width=5,
         )
-        draw.ellipse((cx - 45, cy - 15, cx - 20, cy + 12), fill="black")
-        draw.ellipse((cx + 20, cy - 15, cx + 45, cy + 12), fill="black")
+        draw.ellipse(
+            (cx - 45, cy - 15, cx - 20, cy + 12),
+            fill="black",
+        )
+        draw.ellipse(
+            (cx + 20, cy - 15, cx + 45, cy + 12),
+            fill="black",
+        )
         draw.polygon(
-            [(cx - 12, cy + 20), (cx + 12, cy + 20),
-             (cx, cy + 35)],
+            [
+                (cx - 12, cy + 20),
+                (cx + 12, cy + 20),
+                (cx, cy + 35),
+            ],
             fill=(210, 80, 100),
         )
         draw.arc(
@@ -189,34 +214,114 @@ def draw_character(draw, kind, cx, cy, bob):
             fill="black",
             width=4,
         )
+
         for offset in (-1, 1):
             draw.line(
-                (cx + offset * 35, cy + 30,
-                 cx + offset * 100, cy + 15),
+                (
+                    cx + offset * 35,
+                    cy + 30,
+                    cx + offset * 100,
+                    cy + 15,
+                ),
                 fill=(90, 65, 50),
                 width=3,
             )
 
 
-async def make_voice(text):
-    voice = edge_tts.Communicate(
-        text,
-        voice="ar-EG-SalmaNeural",
-        rate="+5%",
+def make_voice(text):
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY مش موجود في GitHub Secrets."
+        )
+
+    client = genai.Client(api_key=api_key)
+
+    style = (
+        "Speak in natural Egyptian Arabic (Masri), using everyday "
+        "Egyptian expressions and pronunciation, not Modern Standard "
+        "Arabic. Use a warm, lively female cartoon-storyteller voice. "
+        "Speak clearly at a natural pace. Read only the exact story text; "
+        "do not add an introduction, explanation, or extra words."
     )
-    await voice.save(str(OUT / "narration.mp3"))
+
+    response = client.models.generate_content(
+        model="gemini-3.8-flash-tts",
+        contents=[
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": text,
+                        "speech_metadata": {"style": style},
+                    }
+                ],
+            }
+        ],
+        config=types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    voice="Kore"
+                )
+            ),
+        ),
+    )
+
+    audio_data = None
+
+    for candidate in response.candidates or []:
+        if not candidate.content:
+            continue
+
+        for part in candidate.content.parts or []:
+            if part.inline_data and part.inline_data.data:
+                audio_data = part.inline_data.data
+                break
+
+        if audio_data:
+            break
+
+    if not audio_data:
+        raise RuntimeError(
+            "Gemini ملقاش صوت في الاستجابة. راجع الموديل وحدود الـ API."
+        )
+
+    audio_path = OUT / "narration.wav"
+    audio_path.write_bytes(audio_data)
+
+    # التأكد إن الملف الناتج WAV صالح
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(audio_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    if probe.returncode != 0:
+        raise RuntimeError(
+            "Gemini رجّع ملف صوت غير صالح: " + probe.stderr[-1000:]
+        )
+
+    print("Voice generated:", audio_path)
 
 
 narration = " ".join(lines)
-asyncio.run(make_voice(narration))
+make_voice(narration)
 
 # معرفة مدة التعليق الصوتي
 probe = subprocess.run(
     [
-        "ffprobe", "-v", "error",
+        "ffprobe",
+        "-v", "error",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
-        str(OUT / "narration.mp3"),
+        str(OUT / "narration.wav"),
     ],
     capture_output=True,
     text=True,
@@ -249,6 +354,7 @@ for scene_index, text in enumerate(lines):
             int(top_color[c] * (1 - t) + bottom_color[c] * t)
             for c in range(3)
         )
+
         for x in range(W):
             pixels[x, y] = color
 
@@ -328,7 +434,10 @@ for scene_index, text in enumerate(lines):
             (left, top, left + W, top + H)
         )
 
-        frame.save(FRAMES / f"{frame_number:05d}.jpg", quality=90)
+        frame.save(
+            FRAMES / f"{frame_number:05d}.jpg",
+            quality=90,
+        )
         frame_number += 1
 
 # تجميع الإطارات في فيديو
@@ -337,7 +446,7 @@ subprocess.run(
         "ffmpeg", "-y",
         "-framerate", str(FPS),
         "-i", str(FRAMES / "%05d.jpg"),
-        "-i", str(OUT / "narration.mp3"),
+        "-i", str(OUT / "narration.wav"),
         "-map", "0:v:0",
         "-map", "1:a:0",
         "-c:v", "libx264",
