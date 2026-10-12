@@ -22,12 +22,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core
           python -m pip install --upgrade pip
-          pip install --upgrade pillow edge-tts google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
+          pip install --upgrade "google-genai>=2.25.0" pillow google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
 
       - name: Generate story
         run: python story_generator.py
 
       - name: Generate video
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python video_generator.py
 
       - name: Upload video to YouTube
