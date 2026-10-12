@@ -9,9 +9,9 @@ permissions:
   contents: read
 
 jobs:
-  generate-video:
+  generate-and-upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Checkout project
@@ -22,7 +22,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core
           python -m pip install --upgrade pip
-          pip install pillow edge-tts
+          pip install pillow edge-tts google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
 
       - name: Generate story
         run: python story_generator.py
@@ -30,9 +30,18 @@ jobs:
       - name: Generate video
         run: python video_generator.py
 
-      - name: Save video
+      - name: Upload video to YouTube
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: python youtube_uploader.py
+
+      - name: Save video artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: daily-short
           path: output/short.mp4
+          if-no-files-found: ignore
           retention-days: 7
