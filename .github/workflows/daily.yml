@@ -9,12 +9,24 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  generate-story:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Start automation
-        run: |
-          echo "Egyptian AI Shorts automation started!"
-          echo "Preparing the daily video workflow..."
-          date -u
+      - name: Get project files
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate Egyptian story
+        run: python story_generator.py
+
+      - name: Save generated story
+        uses: actions/upload-artifact@v4
+        with:
+          name: egyptian-short-story
+          path: output/story.txt
+          retention-days: 30
