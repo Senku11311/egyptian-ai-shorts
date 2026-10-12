@@ -9,24 +9,30 @@ permissions:
   contents: read
 
 jobs:
-  generate-story:
+  generate-video:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: Get project files
+      - name: Checkout project
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-noto-core
+          python -m pip install --upgrade pip
+          pip install pillow edge-tts
 
-      - name: Generate Egyptian story
+      - name: Generate story
         run: python story_generator.py
 
-      - name: Save generated story
+      - name: Generate video
+        run: python video_generator.py
+
+      - name: Save video
         uses: actions/upload-artifact@v4
         with:
-          name: egyptian-short-story
-          path: output/story.txt
-          retention-days: 30
+          name: daily-short
+          path: output/short.mp4
+          retention-days: 7
