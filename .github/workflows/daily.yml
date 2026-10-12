@@ -1,0 +1,20 @@
+name: Egyptian AI Shorts
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 12 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Start automation
+        run: |
+          echo "Egyptian AI Shorts automation started!"
+          echo "Preparing the daily video workflow..."
+          date -u
